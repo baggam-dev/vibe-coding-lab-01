@@ -18,5 +18,9 @@
   "bugs": {
     "url": "https://github.com/baggam-dev/vibe-coding-lab-01/issues"
   },
-  "homepage": "https://github.com/baggam-dev/vibe-coding-lab-01#readme"
+  "homepage": "https://github.com/baggam-dev/vibe-coding-lab-01#readme",
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "openai": "^6.25.0"
+  }
 }
