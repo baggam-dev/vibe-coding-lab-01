@@ -1,13 +1,92 @@
 require("dotenv").config();
+
 const http = require("http");
 const { OpenAI } = require("openai");
-const url = require("url");
+const { URL } = require("url");
+const crypto = require("crypto");
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-function sendJson(res, status, data) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(data));
+// =========================
+// Config
+// =========================
+// Render 프론트 URL을 명시적으로 허용하는 것을 추천합니다.
+// 예: ALLOWED_ORIGINS="http://localhost:5173,https://vibe-coding-lab-01-web.onrender.com"
+const ALLOWED_ORIGINS = new Set(
+  (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+
+// 디버그 중이면 true 추천 (Render 로그에서 보기 좋음)
+const DEBUG = (process.env.DEBUG || "true").toLowerCase() === "true";
+
+// =========================
+// Helpers
+// =========================
+function nowMs() {
+  return Date.now();
+}
+
+function reqId() {
+  return crypto.randomBytes(6).toString("hex"); // 12 chars
+}
+
+function log(...args) {
+  if (DEBUG) console.log(...args);
+}
+
+function setNoStore(res) {
+  // 304/캐시로 인한 이상 동작 방지
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
+
+function setCors(req, res) {
+  const origin = req.headers.origin;
+
+  // origin이 없는 경우(서버-서버, curl 등)는 그냥 통과
+  if (!origin) return;
+
+  // 허용 목록이 비어있으면(=설정 안 함) 디버그 단계에서는 일단 전체 허용도 가능
+  // 보안적으로는 ALLOWED_ORIGINS 지정 추천.
+  if (ALLOWED_ORIGINS.size === 0) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  } else if (ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+function sendJson(req, res, status, data) {
+  setCors(req, res);
+  setNoStore(res);
+
+  const body = JSON.stringify(data);
+
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body, "utf8"),
+  });
+  res.end(body);
+}
+
+function sendText(req, res, status, text) {
+  setCors(req, res);
+  setNoStore(res);
+
+  const body = String(text ?? "");
+  res.writeHead(status, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body, "utf8"),
+  });
+  res.end(body);
 }
 
 // ✅ JSON body 읽기 (Node http 기본)
@@ -18,7 +97,7 @@ function readJsonBody(req, limitBytes = 1_000_000) {
     req.on("data", (chunk) => {
       data += chunk;
       if (Buffer.byteLength(data, "utf8") > limitBytes) {
-        reject(new Error("Payload too large"));
+        reject(new Error("PayloadTooLarge"));
         req.destroy();
       }
     });
@@ -27,8 +106,8 @@ function readJsonBody(req, limitBytes = 1_000_000) {
       if (!data) return resolve({});
       try {
         resolve(JSON.parse(data));
-      } catch (e) {
-        reject(new Error("Invalid JSON"));
+      } catch {
+        reject(new Error("InvalidJson"));
       }
     });
 
@@ -36,91 +115,143 @@ function readJsonBody(req, limitBytes = 1_000_000) {
   });
 }
 
+async function generateWithOpenAI(prompt) {
+  // 프론트에서 “5줄” 프롬프트를 이미 강제하므로,
+  // 여기서는 prompt 그대로 전달하는 게 가장 직관적입니다.
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      // system은 최소로 유지(프롬프트를 덮어쓰지 않게)
+      { role: "system", content: "당신은 한국어 동화 작가입니다." },
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.9,
+  });
+
+  const text = completion.choices?.[0]?.message?.content ?? "";
+  return text;
+}
+
+// =========================
+// Handlers
+// =========================
+async function handleHealth(req, res, _url, rid) {
+  return sendJson(req, res, 200, { ok: true, message: "server running", rid });
+}
+
+async function handleGenerateGet(req, res, url, rid) {
+  const prompt = (url.searchParams.get("prompt") || "").trim();
+  if (!prompt) {
+    return sendJson(req, res, 400, {
+      ok: false,
+      rid,
+      error: "Missing prompt. Use /generate?prompt=...",
+    });
+  }
+
+  const text = await generateWithOpenAI(prompt);
+
+  return sendJson(req, res, 200, {
+    ok: true,
+    rid,
+    prompt,
+    text,
+    // 프론트가 기대하는 키도 같이 제공 (호환성)
+    story: text,
+  });
+}
+
+async function handleGeneratePost(req, res, _url, rid) {
+  const ct = (req.headers["content-type"] || "").toLowerCase();
+  if (!ct.includes("application/json")) {
+    return sendJson(req, res, 415, {
+      ok: false,
+      rid,
+      error: "Content-Type must be application/json",
+    });
+  }
+
+  const body = await readJsonBody(req);
+  const prompt = (body.prompt || "").toString().trim();
+
+  if (!prompt) {
+    return sendJson(req, res, 400, {
+      ok: false,
+      rid,
+      error: 'Missing prompt in JSON body. Example: {"prompt":"..."}',
+    });
+  }
+
+  const text = await generateWithOpenAI(prompt);
+
+  // ✅ 반드시 story 키 포함 (프론트가 안정적으로 표시)
+  return sendJson(req, res, 200, { ok: true, rid, text, story: text });
+}
+
+// =========================
+// Server
+// =========================
 const server = http.createServer(async (req, res) => {
+  const start = nowMs();
+  const rid = reqId();
+
+  // 요청/응답 추적용: status, bytes 로깅
+  let bytesWritten = 0;
+  const _end = res.end.bind(res);
+  res.end = (chunk, encoding, cb) => {
+    if (chunk) {
+      bytesWritten += Buffer.isBuffer(chunk)
+        ? chunk.length
+        : Buffer.byteLength(String(chunk), encoding || "utf8");
+    }
+    return _end(chunk, encoding, cb);
+  };
+
   try {
-    const parsed = url.parse(req.url, true);
+    // 공통 헤더
+    setCors(req, res);
+    setNoStore(res);
 
-    // 1) 헬스체크
-    if (parsed.pathname === "/" || parsed.pathname === "/health") {
-      return sendJson(res, 200, { ok: true, message: "server running" });
+    // ✅ 프리플라이트 처리 (중요)
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      log(`[${rid}] OPTIONS ${req.url} -> 204 (${nowMs() - start}ms) bytes=${bytesWritten}`);
+      return;
     }
 
-    // 2) GET /generate?prompt=... (테스트용 유지)
-    if (parsed.pathname === "/generate" && req.method === "GET") {
-      const prompt = (parsed.query.prompt || "").toString().trim();
+    const urlObj = new URL(req.url, `http://${req.headers.host}`);
+    const pathname = urlObj.pathname;
 
-      if (!prompt) {
-        return sendJson(res, 400, {
-          ok: false,
-          error: "Missing prompt. Use /generate?prompt=...",
-        });
-      }
-
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "당신은 한국어 인터랙티브 스토리 작가입니다. 6~10문장 내로 장면을 쓰고, 마지막에 선택지 3개를 A/B/C로 제시하세요.",
-          },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0.9,
-      });
-
-      const text = completion.choices?.[0]?.message?.content ?? "";
-      return sendJson(res, 200, { ok: true, prompt, text });
+    // 라우팅
+    if (pathname === "/" || pathname === "/health") {
+      await handleHealth(req, res, urlObj, rid);
+    } else if (pathname === "/generate" && req.method === "GET") {
+      await handleGenerateGet(req, res, urlObj, rid);
+    } else if (pathname === "/generate" && req.method === "POST") {
+      await handleGeneratePost(req, res, urlObj, rid);
+    } else {
+      sendJson(req, res, 404, { ok: false, rid, error: "Not found" });
     }
 
-    // ✅ 3) POST /generate  (실전용)
-    if (parsed.pathname === "/generate" && req.method === "POST") {
-      const ct = (req.headers["content-type"] || "").toLowerCase();
-      if (!ct.includes("application/json")) {
-        return sendJson(res, 415, {
-          ok: false,
-          error: "Content-Type must be application/json",
-        });
-      }
-
-      const body = await readJsonBody(req);
-      const prompt = (body.prompt || "").toString().trim();
-
-      if (!prompt) {
-        return sendJson(res, 400, {
-          ok: false,
-          error: "Missing prompt in JSON body. Example: {\"prompt\":\"...\"}",
-        });
-      }
-
-      // (선택) 파라미터로 톤/난이도도 받을 수 있게 확장 가능
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "당신은 한국어 인터랙티브 스토리 작가입니다. 6~10문장 내로 장면을 쓰고, 마지막에 선택지 3개를 A/B/C로 제시하세요.",
-          },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0.9,
-      });
-
-      const text = completion.choices?.[0]?.message?.content ?? "";
-      return sendJson(res, 200, { ok: true, prompt, text });
-    }
-
-    return sendJson(res, 404, { ok: false, error: "Not found" });
+    log(
+      `[${rid}] ${req.method} ${pathname} -> ${res.statusCode} (${nowMs() - start}ms) bytes=${bytesWritten}`
+    );
   } catch (e) {
-    console.error(e);
+    console.error(`[${rid}] ERROR`, e);
+
     const msg =
-      e?.message === "Invalid JSON"
+      e?.message === "InvalidJson"
         ? "Invalid JSON body"
-        : e?.message === "Payload too large"
+        : e?.message === "PayloadTooLarge"
         ? "Payload too large"
         : "Server error";
-    return sendJson(res, 500, { ok: false, error: msg });
+
+    // 에러도 JSON으로, 바디 비우지 않기
+    sendJson(req, res, 500, { ok: false, rid, error: msg });
+    log(
+      `[${rid}] ${req.method} ${req.url} -> 500 (${nowMs() - start}ms) bytes=${bytesWritten}`
+    );
   }
 });
 
