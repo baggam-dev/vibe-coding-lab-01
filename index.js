@@ -16,7 +16,7 @@ const ALLOWED_ORIGINS = new Set(
   (process.env.ALLOWED_ORIGINS || "")
     .split(",")
     .map((s) => s.trim())
-    .filter(Boolean)
+    .filter(Boolean),
 );
 
 // 디버그 중이면 true 추천 (Render 로그에서 보기 좋음)
@@ -39,29 +39,19 @@ function log(...args) {
 
 function setNoStore(res) {
   // 304/캐시로 인한 이상 동작 방지
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate",
+  );
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
 }
 
 function setCors(req, res) {
-  const origin = req.headers.origin;
-
-  // origin이 없는 경우(서버-서버, curl 등)는 그냥 통과
-  if (!origin) return;
-
-  // 허용 목록이 비어있으면(=설정 안 함) 디버그 단계에서는 일단 전체 허용도 가능
-  // 보안적으로는 ALLOWED_ORIGINS 지정 추천.
-  if (ALLOWED_ORIGINS.size === 0) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  } else if (ALLOWED_ORIGINS.has(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
-
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Cache-Control, Pragma",
+  );
 }
 
 function sendJson(req, res, status, data) {
@@ -216,7 +206,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
-      log(`[${rid}] OPTIONS ${req.url} -> 204 (${nowMs() - start}ms) bytes=${bytesWritten}`);
+      log(
+        `[${rid}] OPTIONS ${req.url} -> 204 (${nowMs() - start}ms) bytes=${bytesWritten}`,
+      );
       return;
     }
 
@@ -235,7 +227,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     log(
-      `[${rid}] ${req.method} ${pathname} -> ${res.statusCode} (${nowMs() - start}ms) bytes=${bytesWritten}`
+      `[${rid}] ${req.method} ${pathname} -> ${res.statusCode} (${nowMs() - start}ms) bytes=${bytesWritten}`,
     );
   } catch (e) {
     console.error(`[${rid}] ERROR`, e);
@@ -244,13 +236,13 @@ const server = http.createServer(async (req, res) => {
       e?.message === "InvalidJson"
         ? "Invalid JSON body"
         : e?.message === "PayloadTooLarge"
-        ? "Payload too large"
-        : "Server error";
+          ? "Payload too large"
+          : "Server error";
 
     // 에러도 JSON으로, 바디 비우지 않기
     sendJson(req, res, 500, { ok: false, rid, error: msg });
     log(
-      `[${rid}] ${req.method} ${req.url} -> 500 (${nowMs() - start}ms) bytes=${bytesWritten}`
+      `[${rid}] ${req.method} ${req.url} -> 500 (${nowMs() - start}ms) bytes=${bytesWritten}`,
     );
   }
 });
