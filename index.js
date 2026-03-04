@@ -48,6 +48,23 @@ function setNoStore(res) {
 }
 
 function setCors(req, res) {
+  const origin = req.headers.origin;
+
+  if (!origin) return;
+
+  // 🔥 디버그용 로그 (추천)
+  log(`[CORS] incoming origin=${origin}`);
+
+  // 개발 단계: 허용 목록이 있으면 검사, 없으면 모두 허용
+  if (ALLOWED_ORIGINS.size === 0 || ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  } else {
+    // 🔥 디버그 로그
+    log(`[CORS] origin not allowed: ${origin}`);
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, Cache-Control, Pragma",
